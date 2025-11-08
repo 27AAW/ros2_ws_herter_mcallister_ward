@@ -1,15 +1,23 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.substitutions import PathJoinSubstitution
-from launch_ros.substitutions import FindPackageShare
+import os
+from ament_index_python.packages import get_package_share_directory
+
 
 def generate_launch_description():
-    urdf_file = PathJoinSubstitution([
-        FindPackageShare('robot_bringup'), 'urdf', 'robot.urdf'
-    ])
-    rviz_config_file = PathJoinSubstitution([
-        FindPackageShare('robot_bringup'), 'rviz', 'simulation.rviz'
-    ])
+    # Resolve package share and URDF/RViz paths
+    pkg_share = get_package_share_directory('robot_bringup')
+    urdf_file_path = os.path.join(pkg_share, 'urdf', 'robot.urdf')
+    rviz_config_file = os.path.join(pkg_share, 'rviz', 'simulation.rviz')
+
+    # Read URDF contents and pass as parameter to robot_state_publisher
+    robot_description = ''
+    try:
+        with open(urdf_file_path, 'r') as fh:
+            robot_description = fh.read()
+    except Exception as e:
+        # Let the launch still run; robot_state_publisher will warn if empty
+        print(f'Warning: failed to read URDF file: {e}')
 
     return LaunchDescription([
         Node(
@@ -25,8 +33,8 @@ def generate_launch_description():
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
-            arguments=[urdf_file],
-            output='screen'
+            output='screen',
+            parameters=[{'robot_description': robot_description}]
         ),
         Node(
             package='rviz2',

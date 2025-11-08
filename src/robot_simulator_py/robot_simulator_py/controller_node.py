@@ -2,7 +2,8 @@
 import math
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped
+from nav_msgs.msg import Path
 from tf2_ros import Buffer, TransformListener
 from rclpy.duration import Duration
 
@@ -30,6 +31,12 @@ class ControllerNode(Node):
         # Publisher for /cmd_vel
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.get_logger().info("Publisher to /cmd_vel initialized")
+
+        # Publisher for path visualization
+        self.path_pub = self.create_publisher(Path, '/path', 10)
+        self.path = Path()
+        self.path.header.frame_id = 'odom'
+        self.get_logger().info("Publisher to /path initialized")
 
         # TF listener
         self.tf_buffer = Buffer()
@@ -83,6 +90,20 @@ class ControllerNode(Node):
             current_y = trans.transform.translation.y
             q = trans.transform.rotation
             roll, pitch, current_yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+            
+            # Create PoseStamped for path
+            pose_stamped = PoseStamped()
+            pose_stamped.header.stamp = self.get_clock().now().to_msg()
+            pose_stamped.header.frame_id = 'odom'
+            pose_stamped.pose.position.x = current_x
+            pose_stamped.pose.position.y = current_y
+            pose_stamped.pose.position.z = 0.0
+            pose_stamped.pose.orientation = q
+            
+            # Append to path and publish
+            self.path.poses.append(pose_stamped)
+            self.path.header.stamp = pose_stamped.header.stamp
+            self.path_pub.publish(self.path)
             
             # Initialize starting position on first run
             if self.start_x is None:
