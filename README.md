@@ -44,7 +44,7 @@ sudo rosdep init
 rosdep update
 
 # 3. Clone and navigate to workspace
-cd /home/rex/Documents/ROBE313/ros2_ws_herter_mcallister_ward
+cd /home/user/Documents/ROBE313/ros2_ws_herter_mcallister_ward
 
 # 4. Install package dependencies
 rosdep install --from-paths src --ignore-src -r -y
