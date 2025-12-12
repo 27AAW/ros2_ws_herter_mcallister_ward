@@ -27,6 +27,12 @@ def generate_launch_description():
         ),
         Node(
             package='robot_simulator_py',
+            executable='mission_controller',
+            name='mission_controller',
+            output='screen'
+        ),
+        Node(
+            package='robot_simulator_py',
             executable='controller_node',
             output='screen'
         ),
