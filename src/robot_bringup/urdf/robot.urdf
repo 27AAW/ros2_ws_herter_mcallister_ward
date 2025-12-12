@@ -1,28 +1,86 @@
 <?xml version="1.0"?>
 <robot name="simple_robot">
+  <!-- world root link -->
+  <link name="world" />
+
+  <!-- base link (robot body) -->
   <link name="base_link">
     <visual>
       <geometry>
-        <box size="0.5 0.5 0.2"/>
+        <box size="0.40 0.25 0.05" />
       </geometry>
+      <!-- center the base slightly above wheel centerline -->
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
       <material name="blue">
-        <color rgba="0 0 1.0 1.0"/>
+        <color rgba="0 0.2 0.8 1.0"/>
       </material>
     </visual>
   </link>
+
+  <!-- left and right wheels -->
+  <link name="left_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.05" radius="0.06" />
+      </geometry>
+      <!-- rotate cylinder so its axis aligns with Y (axle) -->
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <material name="black">
+        <color rgba="0.05 0.05 0.05 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="right_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.05" radius="0.06" />
+      </geometry>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <material name="black">
+        <color rgba="0.05 0.05 0.05 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- camera link located 5 cm above base_link -->
   <link name="camera_link">
     <visual>
       <geometry>
-        <cylinder length="0.1" radius="0.05"/>
+        <box size="0.06 0.04 0.03" />
       </geometry>
-      <material name="red">
-        <color rgba="1.0 0 0 1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <material name="black">
+        <color rgba="0 0 0 1.0"/>
       </material>
     </visual>
   </link>
-  <joint name="base_to_camera" type="fixed">
+
+  <!-- joints -->
+  <joint name="world" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>
+  </joint>
+
+  <!-- wheels are fixed to the base for visualization (publish joint_states later if you want rotation) -->
+  <joint name="left_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_wheel"/>
+    <origin xyz="0 0.12 0.06" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="right_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_wheel"/>
+    <origin xyz="0 -0.12 0.06" rpy="0 0 0"/>
+  </joint>
+
+  <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <origin xyz="0 0 0.3" rpy="0 0 0"/>
+    <origin xyz="0.2 0 0.1" rpy="0 0 0"/>
   </joint>
+
 </robot>
+
