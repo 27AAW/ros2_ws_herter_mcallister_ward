@@ -1,6 +1,6 @@
 # Final Project: Autonomous Warehouse Inspection Robot
 
-ROS 2 implementation for ROBE 313 Fall 2025 final project by Luis Escobar and Giacomo Marani.
+ROS 2 implementation for ROBE 313 Fall 2025 final project
 
 ![ROS 2](https://img.shields.io/badge/ROS_2-Humble-blue)
 ![C++](https://img.shields.io/badge/C%2B%2B-17-orange)
