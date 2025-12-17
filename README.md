@@ -1,23 +1,19 @@
-# Homework 3 
-## Multi-Language ROS 2 Mobile Robot Simulation
+# Final Project: Autonomous Warehouse Inspection Robot
 
-A ROS 2 workspace implementing a 3-DOF omnidirectional robot simulator with autonomous square navigation and manual joystick control.
+ROS 2 implementation for ROBE 313 Fall 2025 final project by Luis Escobar and Giacomo Marani.
 
 ![ROS 2](https://img.shields.io/badge/ROS_2-Humble-blue)
 ![C++](https://img.shields.io/badge/C%2B%2B-17-orange)
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.5-green)
 
 ## 🎯 Features
-
-- **🤖 Autonomous Navigation**: State machine-based controller with proportional control for precise 2m × 2m square path following
-- **🎮 Manual Teleoperation**: Full 3-DOF joystick control (forward/backward, strafe, rotation, vertical)
-- **📡 Real-time Odometry**: C++ odometry node with TF2 transform broadcasting
-- **🔧 Custom Service**: Reset position service for instant robot repositioning
-- **📊 Visualization**: Pre-configured RViz setup with TF display and trajectory tracking
-- **🔄 Closed-loop Control**: Uses TF2 pose feedback for accurate waypoint navigation
-
-
-## 🚀 Quick Start
+- **🔄 Differential Drive**: ẋ=vcosθ, ẏ=vsinθ, θ̇=ω from `/cmd_vel`
+- **🎯 ArUco Detection**: Camera search (60s max)
+- **🧠 Mission FSM**: Full sequence handling
+- **📸 Image Analysis**: Motion + feature counting
+- **⚡ TF**: `camera_link` → `base_link`
+- **📡 Interface**: `/missions` → `/robot_status` + `/robot_report`
 
 ### Prerequisites
 
@@ -56,75 +52,63 @@ colcon build --symlink-install
 # 6. Source workspace
 source install/setup.bash
 ```
+## 🚀 Launching the Student System
 
-## 🎮 Usage
-
-### Autonomous Square Navigation
-
-Launch the autonomous controller to watch the robot drive a precise 2m × 2m square:
+To run the autonomous warehouse inspection system, launch the student-developed
+nodes using the final mission launch file:
 
 ```bash
-ros2 launch robot_bringup robot_simulation.launch.py
+ros2 launch robot_bringup final_mission.launch.py
 ```
 
-**What's happening:**
-- Robot starts at origin and navigates through 4 waypoints
-- Uses proportional control for smooth acceleration/deceleration
-- Turns 90° at each corner
-- Continuously loops the square path
+## 🧠 System Architecture & State Machine Design
 
-**Key parameters** (in `controller_node.py`):
-- `side_length = 2.0` - Size of square (meters)
-- `kp_linear = 0.5` - Linear velocity gain
-- `kp_angular = 2.0` - Angular velocity gain
-- `position_tolerance = 0.02` - Waypoint precision (2cm)
-- `angle_tolerance = 0.02` - Turn precision (~1.15°)
+---
+The autonomous warehouse inspection robot is implemented using a **modular ROS 2
+architecture**, where each major responsibility is handled by a dedicated node.
+A centralized **mission control state machine** coordinates robot behavior in
+response to commands from the external Evaluator.
 
-### Manual Joystick Control
 
-Launch teleoperation mode for manual driving:
+### 🏗 Overall System Architecture
 
-```bash
-ros2 launch robot_bringup teleop.launch.py
-```
+The system is composed of the following core components:
 
-**Controls** (Xbox/PlayStation controller):
+#### 1. Mission Control Node (Python)
+- Acts as the **central decision-making unit**
+- Subscribes to `/missions` for evaluator commands
+- Publishes robot state updates to `/robot_status`
+- Publishes mission results to `/robot_report`
+- Transitions between mission states based on:
+  - Evaluator commands
+  - Sensor feedback
+  - Task completion conditions
 
-| Input | Action |
-|-------|--------|
-| Left Stick ↑↓ | Forward / Backward |
-| Left Stick ←→ | Strafe Left / Right |
-| Right Stick ←→ | Rotate Left / Right |
-| Y Button | **Hold to Enable** |
+#### 2. Odometry Node (C++)
+- Simulates **differential-drive kinematics**
+- Integrates robot pose `[x, y, θ]` from `/cmd_vel`
+- Publishes odometry used for navigation and docking
+- Does **not** rely on global ground truth
 
-> ⚠️ **Safety**: You must hold the Y button to enable movement
+#### 3. Perception Modules (Python)
+- **ArUco Detection**
+  - Processes camera images to identify marker IDs and relative positions
+- **Image Analysis**
+  - Motion detection between two images (`image_analysis`)
+  - Feature detection and counting (`image_analysis2`, bonus)
 
-**No physical controller?** Use a software joystick emulator:
+#### 4. Navigation Controller
+- Generates velocity commands on `/cmd_vel`
+- Uses odometry feedback to:
+  - Navigate toward detected ArUco markers
+  - Perform precision docking
+  - Return to the origin
 
-```bash
-# Install AntiMicroX
-sudo apt install antimicrox
+#### 5. TF System
+- Maintains a consistent transform tree
+- Includes a required `camera_link` frame attached to `base_link`
+- Enables correct interpretation of visual data in the robot frame
 
-# Launch and map keyboard keys to joystick axes
-antimicrox
-```
-
-### Testing Without Hardware
-
-```bash
-# View available topics
-ros2 topic list
-
-# Monitor velocity commands
-ros2 topic echo /cmd_vel
-
-# Watch TF transforms
-ros2 run tf2_ros tf2_echo odom base_link
-
-# Call reset service (teleport robot)
-ros2 service call /reset_position custom_interfaces/srv/ResetPosition \
-  "{pose: {position: {x: 1.0, y: 2.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
-```
 
 ## 🔧 Development
 
@@ -136,7 +120,7 @@ Thanks to `--symlink-install`, Python changes are instant:
 # 1. Edit controller_node.py
 # 2. Save file
 # 3. Restart launch (Ctrl+C, then relaunch)
-ros2 launch robot_bringup robot_simulation.launch.py
+ros2 launch robot_bringup final_mission.launch.py
 ```
 
 **No rebuild needed!**
@@ -149,82 +133,7 @@ C++ requires rebuilding:
 # Edit odometry_node.cpp, then:
 colcon build --packages-select robot_simulator_cpp
 source install/setup.bash
-ros2 launch robot_bringup robot_simulation.launch.py
-```
-
-### Adjusting Square Navigation
-
-Edit `src/robot_simulator_py/robot_simulator_py/controller_node.py`:
-
-```python
-# Make a bigger square
-self.side_length = 5.0  # 5m × 5m
-
-# Go faster
-self.max_linear_speed = 1.0
-self.kp_linear = 0.8
-
-# Higher precision
-self.position_tolerance = 0.01  # 1cm tolerance
-```
-
-Save and relaunch (no rebuild needed).
-
-### Tuning Joystick Sensitivity
-
-Edit `src/robot_bringup/launch/teleop.launch.py`:
-
-```python
-'scale_linear.x': 1.0,    # Faster forward/back (was 0.5)
-'scale_linear.y': 1.0,    # Faster strafe (was 0.5)
-'scale_angular.yaw': 2.0, # Faster rotation (was 1.0)
-```
-
-Relaunch to apply (no rebuild needed).
-
-## 📚 Technical Details
-
-### Proportional Control
-
-**Linear velocity:**
-```
-v = kp_linear × distance_to_target
-v = clamp(v, min_speed, max_speed)
-```
-
-**Angular velocity:**
-```
-ω = kp_angular × angle_error
-ω = clamp(ω, -max_angular, max_angular)
-```
-
-**Heading correction** (while driving):
-```
-desired_heading = atan2(Δy, Δx)
-ω_correction = kp_angular × (desired_heading - current_heading)
-```
-
-### State Machine
-
-```
-   ┌─────────┐  distance < tolerance    ┌──────┐
-   │ FORWARD │─────────────────────────>│ TURN │
-   └─────────┘                          └──────┘
-        ^                                   |
-        |      angle_error < tolerance      |
-        └───────────────────────────────────┘
-```
-
-
-
-### Wrong joystick axes
-
-Find correct axis indices:
-
-```bash
-jstest /dev/input/js0
-# Move sticks and note which axes[] values change
-# Update teleop.launch.py with correct indices
+ros2 launch robot_bringup final_mission.launch.py
 ```
 
 ### Build errors
@@ -248,4 +157,4 @@ rosdep install --from-paths src --ignore-src -r -y
 ---
 
 **ROBE313 - Robot Operating Systems**  
-*November 2025*
+*December 2025*
