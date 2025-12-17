@@ -47,9 +47,9 @@ public:
 
 private:
   void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-    // Store commanded velocity
+    // Store commanded velocity for differential drive (only linear.x and angular.z)
     vx_ = msg->linear.x;
-    vy_ = msg->linear.y;
+    vy_ = 0.0;  // Differential drive cannot move sideways
     vtheta_ = msg->angular.z;
   }
 
@@ -57,9 +57,9 @@ private:
     auto current_time = this->now();
     double dt = (current_time - last_time_).seconds();
 
-    // Simple planar robot odometry integration
-    double delta_x = (vx_ * std::cos(theta_) - vy_ * std::sin(theta_)) * dt;
-    double delta_y = (vx_ * std::sin(theta_) + vy_ * std::cos(theta_)) * dt;
+    // Differential drive odometry integration
+    double delta_x = vx_ * std::cos(theta_) * dt;
+    double delta_y = vx_ * std::sin(theta_) * dt;
     double delta_theta = vtheta_ * dt;
 
     x_ += delta_x;

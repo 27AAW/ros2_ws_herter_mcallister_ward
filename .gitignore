@@ -1,4 +1,7 @@
 /build/*
+/src/build/*
+/src/install/*
+/src/log/*
 /install/*
 /log/*
 *.pyc
