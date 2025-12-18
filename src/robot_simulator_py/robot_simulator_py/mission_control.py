@@ -187,7 +187,7 @@ class MissionController(Node):
             self.do_return_to_origin()
 
     def do_search_aruco(self):
-        """Square pattern - 2m sides, proper square movement"""
+        """5-STAGE Warehouse ArUco Search: SPIN + 5m Square"""
         if self.phase_start_time is None or self.search_start_time is None:
             self.phase_start_time = self.get_clock().now()
             self.search_start_time = self.get_clock().now()
@@ -208,41 +208,46 @@ class MissionController(Node):
 
         twist = Twist()
 
-        # LARGER SQUARE: 2m sides = 7s at 0.3m/s
-        FORWARD_TIME = 16   #4.8 m forward
-        TURN_TIME = 2.5      # 90° turns
+        # PERFECT WAREHOUSE COVERAGE
+        SPIN_TIME = 8.0      # Phase 0: 360° spin (ALL 4 walls)
+        FORWARD_TIME = 16.0  # 4.8m forward (walls)
+        TURN_TIME = 4.0      # Slow 90° turns (scan during turn)
 
-        if self.square_phase == 0:  # Forward 2m
-            if dt_since_phase_start < FORWARD_TIME:
-                twist.linear.x = 0.3
-            else:
+        if self.square_phase == 0:  # SPIN 360° - SEE ALL WALLS!
+            twist.angular.z = 0.5
+            if dt_since_phase_start > SPIN_TIME:
                 self.square_phase = 1
                 self.phase_start_time = now
-               
-        elif self.square_phase == 1:  # Turn 90° LEFT
-            twist.angular.z = 0.8  # Faster turn
+                self.get_logger().info('SPIN COMPLETE → Start 5m Square')
+
+        elif self.square_phase == 1:  # Turn 90° LEFT (scan wall)
+            twist.angular.z = 0.4
             if dt_since_phase_start > TURN_TIME:
                 self.square_phase = 2
                 self.phase_start_time = now
-               
 
-        elif self.square_phase == 2:  # Forward 2m
+        elif self.square_phase == 2:  # Forward 4.8m (along wall)
             if dt_since_phase_start < FORWARD_TIME:
                 twist.linear.x = 0.3
             else:
                 self.square_phase = 3
                 self.phase_start_time = now
-              
 
-        elif self.square_phase == 3:  # Turn 90° LEFT (complete square)
-            twist.angular.z = 0.8
+        elif self.square_phase == 3:  # Turn 90° LEFT (scan wall)
+            twist.angular.z = 0.4
             if dt_since_phase_start > TURN_TIME:
-                self.square_phase = 0  # Back to start
+                self.square_phase = 4
                 self.phase_start_time = now
-               
+
+        elif self.square_phase == 4:  # Forward 4.8m (along wall)
+            if dt_since_phase_start < FORWARD_TIME:
+                twist.linear.x = 0.3
+            else:
+                self.square_phase = 1  # Back to turn (repeat square)
+                self.phase_start_time = now
 
         self.cmd_pub.publish(twist)
-        
+            
 
     def do_move_to_marker(self):
         if self.current_goal_id not in self.marker_poses and self.current_goal_id not in self.aruco_positions:
