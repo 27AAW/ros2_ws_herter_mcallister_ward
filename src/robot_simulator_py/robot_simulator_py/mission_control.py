@@ -279,14 +279,6 @@ class MissionController(Node):
             self.search_start_time = self.get_clock().now()
             return
 
-        dt_total = (self.get_clock().now() - self.search_start_time).nanoseconds / 1e9
-        if dt_total > 180.0:
-            self.stop_robot()
-            if not self.no_aruco_detected:
-                self.publish_status('no_arucos_detected')
-            self.state = 'STANDBY'
-            return
-
         now = self.get_clock().now()
         dt_since_phase_start = (now - self.search_phase_time).nanoseconds / 1e9
         twist = Twist()
