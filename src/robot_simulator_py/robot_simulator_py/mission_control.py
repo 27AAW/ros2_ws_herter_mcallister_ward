@@ -31,13 +31,10 @@ class MissionController(Node):
         # Square search variables
         self.square_phase = 0
         self.phase_start_time = None
-        self.phase_distance = 0.0
-        self.square_side = 1.0
-        self.phase_start_x = 0.0
 
-        # OpenCV / camera - FIXED ARUCO DICTIONARY
+        # OpenCV / camera - FIXED ARUCO DICTIONARY + GRAYSCALE
         self.bridge = CvBridge()
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)  # CHANGED FROM 4X4_50
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
         self.aruco_params = cv2.aruco.DetectorParameters_create()
         self.aruco_params.adaptiveThreshWinSizeMin = 3
         self.aruco_params.adaptiveThreshWinSizeMax = 23
@@ -57,13 +54,7 @@ class MissionController(Node):
         # FSM timer
         self.timer = self.create_timer(0.1, self.state_machine_step)
 
-        # For simulation
-        self.aruco_positions = {
-            1: (1.0, 2.0, 0.0),
-            2: (-1.0, 3.0, 0.0),
-            3: (2.0, -1.0, 0.0),
-            4: (-2.0, -2.0, 0.0)
-        }
+        # REMOVED aruco_positions - ONLY use real detections!
 
         # Initialization
         self.publish_status('ready')
@@ -72,7 +63,6 @@ class MissionController(Node):
     def missions_callback(self, msg: String):
         text = msg.data.strip()
     
-        # FIXED: Only ignore if ALREADY in that state AND received before
         if text == 'search_aruco' and self.state == 'SEARCH_ARUCO':
             self.get_logger().debug('Ignoring duplicate search_aruco')
             return
@@ -80,7 +70,7 @@ class MissionController(Node):
         self.get_logger().info(f'/missions: "{text}"')
 
         if text == 'search_aruco':
-            self.state = 'SEARCH_ARUCO'  # Set state FIRST
+            self.state = 'SEARCH_ARUCO'
             self.search_start_time = self.get_clock().now()
             self.no_aruco_detected = False
             self.phase_start_time = self.get_clock().now()
@@ -133,45 +123,39 @@ class MissionController(Node):
             self.origin_pose = (x, y, yaw)
 
     def image_callback(self, msg: Image):
-        # FIXED: CONTINUOUS DETECTION WHILE MOVING - NO STATE CHECK!
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # GRAYSCALE REQUIRED!
+            
+            corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+            
+            if ids is not None and len(ids) > 0:
+                self.get_logger().info(f'ARUCO DETECTED: {len(ids)} markers!')
+                ids = ids.flatten()
+                
+                for i, marker_id in enumerate(ids):
+                    pts = corners[i][0]
+                    center_x = float(np.mean(pts[:, 0]))
+                    center_y = float(np.mean(pts[:, 1]))
+
+                    # REPORT PIXEL POSITION (evaluator expects)
+                    report = String()
+                    report.data = f"arucoin position {center_x:.1f}, {center_y:.1f}, 0.5"
+                    self.report_pub.publish(report)
+                    
+                    self.get_logger().info(f'ARUCO {marker_id} at pixel({center_x:.1f}, {center_y:.1f})')
+                    
+                    # Store for navigation (not used if no move_to yet)
+                    h, w, _ = frame.shape
+                    dx_pixels = center_x - w / 2.0
+                    scale = 0.002
+                    x = 1.0
+                    y = -dx_pixels * scale
+                    z = 0.0
+                    self.marker_poses[marker_id] = (self.current_pose[0] + x, self.current_pose[1] + y, z)
+                    self.no_aruco_detected = True
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge error: {e}')
-            return
-
-        corners, ids, rejected = cv2.aruco.detectMarkers(frame, self.aruco_dict, parameters=self.aruco_params)
-
-        if ids is None or len(ids) == 0:
-            return
-
-        self.get_logger().info(f'ARUCO DETECTED: {len(ids)} markers!')
-        ids = ids.flatten()
-        
-        for i, marker_id in enumerate(ids):
-            pts = corners[i][0]
-            center_x = float(np.mean(pts[:, 0]))
-            center_y = float(np.mean(pts[:, 1]))
-
-            h, w, _ = frame.shape
-            dx_pixels = center_x - w / 2.0
-            dy_pixels = center_y - h / 2.0
-
-            # FIXED: REPORT PIXEL POSITION (what evaluator expects)
-            report = String()
-            report.data = f"arucoin position {center_x:.1f}, {center_y:.1f}, 0.5"
-            self.report_pub.publish(report)
-            
-            self.get_logger().info(f'ARUCO {marker_id} REPORTED: pixel({center_x:.1f}, {center_y:.1f})')
-            
-            # Store for navigation too
-            scale = 0.002
-            x = 1.0
-            y = -dx_pixels * scale
-            z = 0.0
-            self.marker_poses[marker_id] = (self.current_pose[0] + x, self.current_pose[1] + y, z)
-
-        # DON'T STOP - LET IT KEEP SEARCHING!
+            self.get_logger().warn(f'Image processing error: {e}')
 
     def state_machine_step(self):
         if self.state == 'STANDBY':
@@ -187,7 +171,7 @@ class MissionController(Node):
             self.do_return_to_origin()
 
     def do_search_aruco(self):
-        """5-STAGE Warehouse ArUco Search: SPIN + 5m Square"""
+        """4-PHASE 5m Square + WALL SCAN STOPS"""
         if self.phase_start_time is None or self.search_start_time is None:
             self.phase_start_time = self.get_clock().now()
             self.search_start_time = self.get_clock().now()
@@ -208,55 +192,62 @@ class MissionController(Node):
 
         twist = Twist()
 
-        # PERFECT WAREHOUSE COVERAGE
-        SPIN_TIME = 8.0      # Phase 0: 360° spin (ALL 4 walls)
-        FORWARD_TIME = 16.0  # 4.8m forward (walls)
-        TURN_TIME = 4.0      # Slow 90° turns (scan during turn)
+        # WALL SCAN TIMING
+        FORWARD_TIME = 16.0        # 4.8m total forward
+        WALL_SCAN_TIME = 1.5       # 1.5s face wall
+        WALL_TURN_TIME = 1.0       # 1s turn to/from wall
+        TURN_90_TIME = 4.0         # Corner turns
+        WALL_STOP_DISTANCE = FORWARD_TIME / 3  # 1/3 through wall
 
-        if self.square_phase == 0:  # SPIN 360° - SEE ALL WALLS!
-            twist.angular.z = 0.5
-            if dt_since_phase_start > SPIN_TIME:
+        if self.square_phase == 0:  # TURN LEFT first (face wall)
+            twist.angular.z = 0.4
+            if dt_since_phase_start > TURN_90_TIME:
                 self.square_phase = 1
                 self.phase_start_time = now
-                self.get_logger().info('SPIN COMPLETE → Start 5m Square')
 
-        elif self.square_phase == 1:  # Turn 90° LEFT (scan wall)
-            twist.angular.z = 0.4
-            if dt_since_phase_start > TURN_TIME:
+        elif self.square_phase == 1:  # Forward + WALL SCAN
+            if dt_since_phase_start < WALL_STOP_DISTANCE:
+                twist.linear.x = 0.3  # Forward 1/3
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME:
+                twist.angular.z = 0.8  # Turn TO wall
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME + WALL_SCAN_TIME:
+                pass  # STOP + SCAN wall
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME*2 + WALL_SCAN_TIME:
+                twist.angular.z = -0.8  # Turn BACK
+            else:
                 self.square_phase = 2
                 self.phase_start_time = now
 
-        elif self.square_phase == 2:  # Forward 4.8m (along wall)
-            if dt_since_phase_start < FORWARD_TIME:
-                twist.linear.x = 0.3
-            else:
+        elif self.square_phase == 2:  # Turn 90° LEFT (corner)
+            twist.angular.z = 0.4
+            if dt_since_phase_start > TURN_90_TIME:
                 self.square_phase = 3
                 self.phase_start_time = now
 
-        elif self.square_phase == 3:  # Turn 90° LEFT (scan wall)
-            twist.angular.z = 0.4
-            if dt_since_phase_start > TURN_TIME:
-                self.square_phase = 4
-                self.phase_start_time = now
-
-        elif self.square_phase == 4:  # Forward 4.8m (along wall)
-            if dt_since_phase_start < FORWARD_TIME:
+        elif self.square_phase == 3:  # Forward + WALL SCAN
+            if dt_since_phase_start < WALL_STOP_DISTANCE:
                 twist.linear.x = 0.3
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME:
+                twist.angular.z = 0.8
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME + WALL_SCAN_TIME:
+                pass  # SCAN!
+            elif dt_since_phase_start < WALL_STOP_DISTANCE + WALL_TURN_TIME*2 + WALL_SCAN_TIME:
+                twist.angular.z = -0.8
             else:
-                self.square_phase = 1  # Back to turn (repeat square)
+                self.square_phase = 0  # Repeat
                 self.phase_start_time = now
 
         self.cmd_pub.publish(twist)
-            
+        self.get_logger().debug(f'Phase={self.square_phase}, dt={dt_since_phase_start:.1f}s')
 
     def do_move_to_marker(self):
-        if self.current_goal_id not in self.marker_poses and self.current_goal_id not in self.aruco_positions:
+        if self.current_goal_id not in self.marker_poses:
             self.publish_status('marker_unknown')
             self.stop_robot()
             self.state = 'STANDBY'
             return
 
-        goal_x, goal_y, _ = self.marker_poses.get(self.current_goal_id, self.aruco_positions.get(self.current_goal_id, (0,0,0)))
+        goal_x, goal_y, _ = self.marker_poses[self.current_goal_id]
         x, y, yaw = self.current_pose
 
         dx = goal_x - x
@@ -307,6 +298,7 @@ class MissionController(Node):
         twist = Twist()
         twist.linear.x = min(0.3, 0.5 * dist)
         twist.angular.z = 1.5 * heading_error
+        self.cmd_pub.publish(twist)
 
     def stop_robot(self):
         twist = Twist()
