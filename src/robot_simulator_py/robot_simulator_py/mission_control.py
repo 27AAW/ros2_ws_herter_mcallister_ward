@@ -12,8 +12,10 @@ import cv2
 from cv_bridge import CvBridge
 import numpy as np
 
+
 def normalize_angle(a: float) -> float:
     return math.atan2(math.sin(a), math.cos(a))
+
 
 class MissionController(Node):
     def __init__(self):
@@ -85,7 +87,7 @@ class MissionController(Node):
         # FIXED #1: Spam protection FIRST
         if text == 'search_aruco' and self.state == 'SEARCH_ARUCO':
             return  # Ignore duplicates immediately
-            
+        
         self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
 
         if text == 'search_aruco':
@@ -177,23 +179,40 @@ class MissionController(Node):
                         if success:
                             x_offset = tvec[0][0]
                             y_offset = tvec[1][0]
+                            z_offset = tvec[2][0]  # WALL HEIGHT!
                             self.marker_poses[marker_id] = (self.current_pose[0] + x_offset,
-                                                            self.current_pose[1] + y_offset, 0.0)
-                            self.get_logger().info(f'3D ARUCO {marker_id}: ({x_offset:.2f}m, {y_offset:.2f}m)')
-                            continue
+                                                            self.current_pose[1] + y_offset, z_offset)
+                            self.get_logger().info(f'3D ARUCO {marker_id}: ({x_offset:.2f}m, {y_offset:.2f}m, {z_offset:.2f}m)')
+                            
+                            # FIXED: WALL MARKER Z + SPEC EXACT FORMAT
+                            report = String()
+                            report.data = f"arucoin position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{self.marker_poses[marker_id][2]:.2f}"
+                            self.report_pub.publish(report)
+                            self.no_aruco_detected = True
+                            self.stop_robot()
+                            self.state = 'STANDBY'
+                            self.publish_status('ready')
+                            return
 
                     # Fallback 2D estimation
-                    report = String()
-                    report.data = f"arucoin position {center_x:.1f}, {center_y:.1f}, 0.5"
-                    self.report_pub.publish(report)
                     dx_pixels = center_x - w / 2.0
                     scale = 0.002
                     x_offset = 1.0
                     y_offset = -dx_pixels * scale
+                    z_offset = 1.0  # Wall assumption for fallback
                     self.marker_poses[marker_id] = (self.current_pose[0] + x_offset, 
-                                                    self.current_pose[1] + y_offset, 0.0)
+                                                    self.current_pose[1] + y_offset, z_offset)
                     self.no_aruco_detected = True
+                    
+                    # FIXED: Proper format even in fallback
+                    report = String()
+                    report.data = f"arucoin position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{self.marker_poses[marker_id][2]:.2f}"
+                    self.report_pub.publish(report)
                     self.get_logger().info(f'ARUCO {marker_id} -> world: {self.marker_poses[marker_id]}')
+                    self.stop_robot()
+                    self.state = 'STANDBY'
+                    self.publish_status('ready')
+                    break
         except Exception as e:
             self.get_logger().warn(f'Image processing error: {e}')
 
@@ -395,12 +414,14 @@ class MissionController(Node):
         msg.data = text
         self.status_pub.publish(msg)
 
+
 def main(args=None):
     rclpy.init(args=args)
     node = MissionController()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
