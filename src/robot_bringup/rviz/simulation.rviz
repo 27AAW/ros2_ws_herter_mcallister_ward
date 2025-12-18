@@ -54,6 +54,7 @@ Visualization Manager:
         All Enabled: true
       Marker Scale: 1
       Name: TF
+      Queue Size: 1000
       Show Arrows: true
       Show Axes: true
       Show Names: true
@@ -109,7 +110,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: odom
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
