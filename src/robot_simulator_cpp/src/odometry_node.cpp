@@ -23,7 +23,7 @@ public:
       "/cmd_vel", 10,
       std::bind(&OdometryNode::cmdVelCallback, this, std::placeholders::_1));
 
-    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
+    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/world", 10);
     path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/path", 10);
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
@@ -39,7 +39,7 @@ public:
 
     last_time_ = this->now();
     timer_ = this->create_wall_timer(20ms, std::bind(&OdometryNode::update, this));
-    path_msg_.header.frame_id = "odom";
+    path_msg_.header.frame_id = "world";
     
     RCLCPP_INFO(this->get_logger(), "odometry_node started");
   }
@@ -87,7 +87,7 @@ private:
     // Publish odometry
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = now;
-    odom.header.frame_id = "odom";
+    odom.header.frame_id = "world";
     odom.child_frame_id = "base_link";
     odom.pose.pose.position.x = x_;
     odom.pose.pose.position.y = y_;
@@ -107,7 +107,7 @@ private:
     // Append to path
     geometry_msgs::msg::PoseStamped p;
     p.header.stamp = now;
-    p.header.frame_id = "odom";
+    p.header.frame_id = "world";
     p.pose = odom.pose.pose;
     path_msg_.poses.push_back(p);
     path_msg_.header.stamp = now;
@@ -116,7 +116,7 @@ private:
     // Publish TF
     geometry_msgs::msg::TransformStamped t;
     t.header.stamp = now;
-    t.header.frame_id = "odom";
+    t.header.frame_id = "world";
     t.child_frame_id = "base_link";
     t.transform.translation.x = x_;
     t.transform.translation.y = y_;

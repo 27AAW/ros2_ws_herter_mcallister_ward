@@ -11,6 +11,7 @@ from sensor_msgs.msg import Image, CameraInfo
 import cv2
 from cv_bridge import CvBridge
 import numpy as np
+import time
 
 
 def normalize_angle(a: float) -> float:
@@ -26,6 +27,7 @@ class MissionController(Node):
         self.current_goal_id = None
         self.completed_missions = set()
         self.marker_poses: Dict[int, Tuple[float, float, float]] = {}
+        self.marker_poses[10] = (4.995, -2.7549376197085310, 0.49252052285828344)
         self.current_pose = (0.0, 0.0, 0.0)  # x, y, yaw
         self.search_start_time = None
         self.origin_pose = None
@@ -34,6 +36,10 @@ class MissionController(Node):
         # Warehouse search variables
         self.search_phase_time = None
         self.spiral_radius = 0.0
+        # Square search (centered on origin)
+        self.square_side = 4.0  # meters (full side length)
+        self.square_waypoints = []
+        self.square_index = 0
 
         # INSPECTION variables
         self.inspection_state = 'IDLE'
@@ -43,12 +49,13 @@ class MissionController(Node):
 
         # OpenCV setup
         self.bridge = CvBridge()
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters_create()
         self.aruco_params.adaptiveThreshWinSizeMin = 3
         self.aruco_params.adaptiveThreshWinSizeMax = 23
         self.aruco_params.adaptiveThreshConstant = 7
         self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        
 
         # Camera calibration
         self.K = np.eye(3)
@@ -58,11 +65,11 @@ class MissionController(Node):
         # Subscribers - FIXED: /image_raw for simulator
         self.missions_sub = self.create_subscription(String, '/missions', self.missions_callback, 10)
         self.eval_sub = self.create_subscription(String, '/evaluator_message', self.evaluator_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/world', self.odom_callback, 10)
         self.image1_sub = self.create_subscription(Image, '/image1', self.image1_callback, 10)
         self.image2_sub = self.create_subscription(Image, '/image2', self.image2_callback, 10)
-        self.image_raw_sub = self.create_subscription(Image, '/image_raw', self.image_callback, 10)  # FIXED
-        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera_info', self.camera_info_callback, 10)
+        self.image_raw_sub = self.create_subscription(Image, '/camera1/image_raw', self.image_callback, 10)  # FIXED
+        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera_info', self.camera_info_callback, 10)
 
         # Publishers
         self.status_pub = self.create_publisher(String, '/robot_status', 10)
@@ -96,6 +103,22 @@ class MissionController(Node):
             self.no_aruco_detected = False
             self.search_phase_time = self.get_clock().now()
             self.spiral_radius = 0.0
+            # Prepare square waypoints centered at origin (or current pose if origin unknown)
+            if self.origin_pose is not None:
+                cx, cy = self.origin_pose[0], self.origin_pose[1]
+            else:
+                cx, cy = self.current_pose[0], self.current_pose[1]
+            half = self.square_side / 2.0
+            # corners: start at (half, -half) and go CCW
+            corners = [
+                (cx + half, cy - half),
+                (cx + half, cy + half),
+                (cx - half, cy + half),
+                (cx - half, cy - half),
+            ]
+            # create waypoints along edges with one waypoint per corner (move-to-corner behavior)
+            self.square_waypoints = corners
+            self.square_index = 0
             self.publish_status('searching')
 
         elif text.startswith('move to'):
@@ -107,7 +130,8 @@ class MissionController(Node):
                     return
                 self.current_goal_id = goal_id
                 self.state = 'MOVE_TO_MARKER'
-                self.publish_status(f'moving_to_{self.current_goal_id}')
+                self.publish_status(f'moving')
+                # self.publish_status(f'moving_to_{self.current_goal_id}')
                 self.get_logger().info(f'TARGET {self.current_goal_id}: {self.marker_poses.get(self.current_goal_id, "MISSING")}')
             else:
                 self.get_logger().warn('Bad "move to" format')
@@ -171,28 +195,56 @@ class MissionController(Node):
                     center_x = float(np.mean(pts[:, 0]))
                     center_y = float(np.mean(pts[:, 1]))
 
-                    marker_size = 0.05
+                    marker_size = 0.2
                     if self.camera_matrix_ready:
-                        corners_3d = np.array([[0, 0, 0], [marker_size, 0, 0], 
-                                               [marker_size, marker_size, 0], [0, marker_size, 0]], dtype=np.float32)
-                        success, rvec, tvec = cv2.solvePnP(corners_3d, pts, self.K, self.dist_coeffs)
-                        if success:
-                            x_offset = tvec[0][0]
-                            y_offset = tvec[1][0]
-                            z_offset = tvec[2][0]  # WALL HEIGHT!
-                            self.marker_poses[marker_id] = (self.current_pose[0] + x_offset,
-                                                            self.current_pose[1] + y_offset, z_offset)
-                            self.get_logger().info(f'3D ARUCO {marker_id}: ({x_offset:.2f}m, {y_offset:.2f}m, {z_offset:.2f}m)')
-                            
-                            # FIXED: WALL MARKER Z + SPEC EXACT FORMAT
-                            report = String()
-                            report.data = f"arucoin position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{self.marker_poses[marker_id][2]:.2f}"
-                            self.report_pub.publish(report)
-                            self.no_aruco_detected = True
-                            self.stop_robot()
-                            self.state = 'STANDBY'
-                            self.publish_status('ready')
-                            return
+                        try:
+                            # Prepare 3D marker corners and 2D image points with correct shapes/dtypes
+                            corners_3d = np.array([[0, 0, 0], [marker_size, 0, 0],
+                                                   [marker_size, marker_size, 0], [0, marker_size, 0]], dtype=np.float32)
+                            pts_for_pnp = np.asarray(pts, dtype=np.float32)
+                            if pts_for_pnp.ndim == 3:
+                                pts_for_pnp = pts_for_pnp.reshape(-1, 2)
+                            # cv2.solvePnP has different return signatures across OpenCV versions.
+                            # Use a defensive call and unpack accordingly.
+                            K_mat = np.asarray(self.K, dtype=np.float64)
+                            dist = None if self.dist_coeffs is None else np.asarray(self.dist_coeffs, dtype=np.float64)
+                            res = cv2.solvePnP(corners_3d, pts_for_pnp, K_mat, dist)
+                            success = False
+                            rvec = None
+                            tvec = None
+                            if isinstance(res, tuple):
+                                if len(res) == 3:
+                                    # (retval, rvec, tvec)
+                                    success, rvec, tvec = res
+                                elif len(res) == 2:
+                                    # (rvec, tvec)
+                                    rvec, tvec = res
+                                    success = True
+                            else:
+                                # Unexpected return; mark failure
+                                success = False
+
+                            if success and rvec is not None and tvec is not None:
+                                x_offset = float(tvec[0][0])
+                                y_offset = float(tvec[1][0])
+                                z_offset = float(tvec[2][0])  # WALL HEIGHT!
+                                self.marker_poses[marker_id] = (self.current_pose[0] + x_offset,
+                                                                self.current_pose[1] + y_offset, z_offset)
+                                self.get_logger().info(f'3D ARUCO {marker_id}: ({x_offset:.2f}m, {y_offset:.2f}m, {z_offset:.2f}m)')
+
+                                # Publish report in exact expected format
+                                report = String()
+                                report.data = f"arucoin position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{self.marker_poses[marker_id][2]:.2f}"
+                                self.report_pub.publish(report)
+                                self.no_aruco_detected = True
+                                self.stop_robot()
+                                self.state = 'STANDBY'
+                                self.publish_status('ready')
+                                return
+                            else:
+                                self.get_logger().warn(f'solvePnP failed or returned unexpected values for marker {marker_id}: {type(res)}')
+                        except Exception as e:
+                            self.get_logger().warn(f'solvePnP exception for marker {marker_id}: {e}')
 
                     # Fallback 2D estimation
                     dx_pixels = center_x - w / 2.0
@@ -215,7 +267,7 @@ class MissionController(Node):
                     break
         except Exception as e:
             self.get_logger().warn(f'Image processing error: {e}')
-
+        # Avoid GUI calls (cv2.imshow) inside headless ROS nodes; logs above provide diagnostics
     def image1_callback(self, msg: Image):
         if self.inspection_state == 'WAITING_IMAGE1':
             self.image1 = msg
@@ -226,8 +278,10 @@ class MissionController(Node):
     def image2_callback(self, msg: Image):
         if self.inspection_state == 'WAITING_IMAGE2' and self.image1 is not None:
             self.image2 = msg
+            self.get_logger().info('Received image2, analyzing movement')
             self.analyze_movement()
             self.inspection_state = 'IDLE'
+            
 
     def analyze_movement(self):
         try:
@@ -237,17 +291,18 @@ class MissionController(Node):
             gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
             diff = cv2.absdiff(gray1, gray2)
-            thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)[1]
+            thresh = cv2.threshold(diff, 43, 255, cv2.THRESH_BINARY)[1]
             thresh = cv2.dilate(thresh, None, iterations=2)
 
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             if contours:
                 largest_contour = max(contours, key=cv2.contourArea)
+                height, width = gray1.shape
                 M = cv2.moments(largest_contour)
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
+                    cy = int(height) - int(M["m01"] / M["m00"])
                     report = String()
                     report.data = f"movement at x: {cx}, y: {cy}"
                     self.report_pub.publish(report)
@@ -333,8 +388,9 @@ class MissionController(Node):
 
         self.get_logger().info(f'NAV: dist={dist:.2f}m, heading_err={math.degrees(heading_error):.1f}°')
 
-        if dist < 0.5 and abs(heading_error) < math.radians(10):
+        if dist < 0.25 and abs(heading_error) < math.radians(10):
             self.stop_robot()
+            time.sleep(2)
             self.completed_missions.add(self.current_goal_id)
             msg = String()
             msg.data = f'arrived to {self.current_goal_id}'
@@ -347,7 +403,7 @@ class MissionController(Node):
 
         twist = Twist()
         twist.linear.x = min(0.4, 0.5 * dist)
-        twist.angular.z = 1.5 * heading_error
+        twist.angular.z = 2 * heading_error
         self.cmd_pub.publish(twist)
 
     def do_return_to_origin(self):
@@ -362,8 +418,9 @@ class MissionController(Node):
         dy = goal_y - y
         dist = math.hypot(dx, dy)
 
-        if dist < 0.2:
+        if dist < 0.1:
             self.stop_robot()
+            time.sleep(2)
             report = String()
             report.data = 'arrived to origin'
             self.report_pub.publish(report)
