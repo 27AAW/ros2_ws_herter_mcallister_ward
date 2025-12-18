@@ -15,10 +15,8 @@ import cv2
 from cv_bridge import CvBridge
 import numpy as np
 
-
 def normalize_angle(a: float) -> float:
     return math.atan2(math.sin(a), math.cos(a))
-
 
 class MissionController(Node):
     def __init__(self):
@@ -33,6 +31,12 @@ class MissionController(Node):
         self.current_pose = (0.0, 0.0, 0.0)  # x, y, yaw
         self.search_start_time = None
         self.origin_pose = None  # will be set from first odom
+
+        # NEW: Square search variables
+        self.square_phase = 0  # 0=forward, 1=turn90, 2=forward, 3=turn90+spin
+        self.phase_start_time = None
+        self.phase_distance = 0.0
+        self.square_side = 1.0  # 1m sides
 
         # OpenCV / camera
         self.bridge = CvBridge()
@@ -142,13 +146,11 @@ class MissionController(Node):
             center_y = float(np.mean(pts[:, 1]))
 
             # Example hack: convert pixel offsets to a rough local position
-            # You should replace this with proper pose estimation using camera intrinsics.
             h, w, _ = frame.shape
             dx_pixels = center_x - w / 2.0
             dy_pixels = center_y - h / 2.0
 
             # Assume marker about 1 m in front, small-angle approx
-            # and some scale factor pixels->meters:
             scale = 0.002  # tune this for your camera/FOV
             x = 1.0  # 1 m forward from camera
             y = -dx_pixels * scale
@@ -189,18 +191,47 @@ class MissionController(Node):
     # ------------- State behaviors -------------
 
     def do_search_aruco(self):
-        # timeout 60 s
-        if self.search_start_time is not None:
-            dt = (self.get_clock().now() - self.search_start_time).nanoseconds
-            if dt > 60e9:
-                self.stop_robot()
-                self.publish_status('search_timeout')
-                self.state = 'STANDBY'
-                return
-
-        # simple spin on the spot
+        """Square + rotate pattern to check all walls"""
+        # Initialize on first call
+        if self.search_start_time is None:
+            self.search_start_time = self.get_clock().now()
+            self.square_phase = 0  # 0=forward, 1=turn90, 2=forward, 3=turn90+spin
+            self.phase_start_time = self.get_clock().now()
+            self.phase_distance = 0.0
+            return
+        
+        # 60s timeout
+        dt_total = (self.get_clock().now() - self.search_start_time).nanoseconds / 1e9
+        if dt_total > 60.0:
+            self.stop_robot()
+            self.publish_status('search_timeout')
+            self.state = 'STANDBY'
+            return
+        
+        now = self.get_clock().now()
+        dt_phase = (now - self.phase_start_time).nanoseconds / 1e9
+        
         twist = Twist()
-        twist.angular.z = 0.3
+        
+        if self.square_phase == 0 or self.square_phase == 2:  # Forward 1m
+            if self.phase_distance < self.square_side:
+                twist.linear.x = 0.3
+                self.phase_distance += 0.3 * dt_phase
+            else:
+                # Side complete, turn 90°
+                twist.angular.z = math.pi / 2  # 90° left
+                if dt_phase > 2.0:  # 2s turn time
+                    self.square_phase = (self.square_phase + 1) % 4
+                    self.phase_start_time = now
+                    self.phase_distance = 0.0
+        
+        elif self.square_phase == 1 or self.square_phase == 3:  # Rotate camera 360°
+            twist.angular.z = 0.5  # Full spin to check walls
+            if dt_phase > 6.0:  # 6s full rotation
+                self.square_phase = (self.square_phase + 1) % 4
+                self.phase_start_time = now
+                self.phase_distance = 0.0
+        
         self.cmd_pub.publish(twist)
 
     def do_move_to_marker(self):
@@ -271,14 +302,12 @@ class MissionController(Node):
         msg.data = text
         self.status_pub.publish(msg)
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = MissionController()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
