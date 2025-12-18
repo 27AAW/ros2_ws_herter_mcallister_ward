@@ -1,280 +1,305 @@
+#!/usr/bin/env python3
+
+import math
+from typing import Dict, Tuple
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
-import time
-import math
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Image
+import cv2
+from cv_bridge import CvBridge
+import numpy as np
 
-class MissionControlNode(Node):
+def normalize_angle(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
+
+class MissionController(Node):
     def __init__(self):
-        super().__init__('mission_control')
-        self.get_logger().info("Mission Control Node started")
+        super().__init__('mission_controller')
+
+        # FSM states
+        self.state = 'STANDBY'
+        self.current_goal_id = None
+        self.marker_poses: Dict[int, Tuple[float, float, float]] = {}
+        self.current_pose = (0.0, 0.0, 0.0)  # x, y, yaw
+        self.search_start_time = None
+        self.origin_pose = None
+        self.no_aruco_detected = False
+
+        # Square search variables
+        self.square_phase = 0
+        self.phase_start_time = None
+        self.phase_distance = 0.0
+        self.square_side = 1.0
+        self.phase_start_x = 0.0
+
+        # OpenCV / camera
+        self.bridge = CvBridge()
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.aruco_params = cv2.aruco.DetectorParameters_create()
+
+        # Subscribers
+        self.missions_sub = self.create_subscription(String, '/missions', self.missions_callback, 10)
+        self.eval_sub = self.create_subscription(String, '/evaluator_message', self.evaluator_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.image_sub = self.create_subscription(Image, '/image_raw', self.image_callback, 10)
 
         # Publishers
         self.status_pub = self.create_publisher(String, '/robot_status', 10)
         self.report_pub = self.create_publisher(String, '/robot_report', 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        # Subscribers
-        self.mission_sub = self.create_subscription(String, '/missions', self.mission_callback, 10)
-        self.evaluator_sub = self.create_subscription(String, '/evaluator_message', self.evaluator_callback, 10)
+        # FSM timer
+        self.timer = self.create_timer(0.1, self.state_machine_step)
 
-        # State variables
-        self.current_mission = None
-        self.state = 'standby'
-        self.start_time = None
-        
-        # Publish ready status on startup
-        self.status_pub.publish(String(data="ready"))
-        self.get_logger().info("Published 'ready' status - waiting for missions...")
-
-        # For simulation purposes
+        # For simulation
         self.aruco_positions = {
             1: (1.0, 2.0, 0.0),
             2: (-1.0, 3.0, 0.0),
             3: (2.0, -1.0, 0.0),
             4: (-2.0, -2.0, 0.0)
         }
-        self.current_position = (0.0, 0.0, 0.0)  # x, y, theta
 
-    def mission_callback(self, msg):
-        mission = msg.data
-        self.get_logger().info(f"Received mission: {mission}")
-        self.current_mission = mission
-        self.execute_mission()
+        # Initialization
+        self.publish_status('ready')
+        self.get_logger().info('MissionController started, state=STANDBY')
 
-    def evaluator_callback(self, msg):
-        feedback = msg.data
-        self.get_logger().info(f"Evaluator feedback: {feedback}")
+    def missions_callback(self, msg: String):
+        text = msg.data.strip()
+    
+    # FIXED: Only ignore if ALREADY in that state AND received before
+        if text == 'search_aruco' and self.state == 'SEARCH_ARUCO':
+            self.get_logger().debug('Ignoring duplicate search_aruco')
+            return
+        
+        self.get_logger().info(f'/missions: "{text}"')
 
-    def execute_mission(self):
-        if self.current_mission == 'search_aruco':
-            self.search_aruco()
-        elif self.current_mission.startswith('move to'):
-            marker_id = int(self.current_mission.split()[-1])
-            self.move_to_marker(marker_id)
-        elif self.current_mission == 'return to origin':
-            self.return_to_origin()
-        elif self.current_mission == 'image_analysis':
-            self.image_analysis()
-        elif self.current_mission == 'image_analysis2':
-            self.image_analysis2()
+        if text == 'search_aruco':
+            self.state = 'SEARCH_ARUCO'  # Set state FIRST
+            self.search_start_time = self.get_clock().now()
+            self.no_aruco_detected = False
+            self.phase_start_time = self.get_clock().now()
+            self.square_phase = 0
+            self.publish_status('searching')
+
+        elif text.startswith('move to'):
+            parts = text.split()
+            if len(parts) == 3 and parts[2].isdigit():
+                self.current_goal_id = int(parts[2])
+                self.state = 'MOVE_TO_MARKER'
+                self.publish_status(f'moving_to_{self.current_goal_id}')
+            else:
+                self.get_logger().warn('Bad "move to" mission format')
+
+        elif text in ['return_to_origin', 'return to origin']:
+            self.state = 'RETURN_TO_ORIGIN'
+            self.publish_status('returning')
+
+        elif text == 'standby':
+            self.state = 'STANDBY'
+            self.stop_robot()
+            self.publish_status('ready')
+            self.get_logger().info('Entered STANDBY mode')
+
         else:
-            self.get_logger().warn(f"Unknown mission: {self.current_mission}")
+            self.get_logger().warn(f'Unknown mission: {text}')
 
-    def search_aruco(self):
-        self.get_logger().info("Executing search_aruco mission - systematic area search")
-        self.status_pub.publish(String(data="searching"))
-        self.start_time = time.time()
-        
-        # Define search area and pattern
-        search_area_size = 8.0  # 8m x 8m area
-        step_size = 1.0  # 1m steps
-        search_timeout = 60.0  # 60 second limit
-        
-        # Generate spiral search waypoints
-        waypoints = self.generate_spiral_waypoints(search_area_size, step_size)
-        self.get_logger().info(f"Generated {len(waypoints)} search waypoints")
-        
-        found_markers = []
-        
-        for i, (target_x, target_y) in enumerate(waypoints):
-            # Check timeout
-            if time.time() - self.start_time > search_timeout:
-                self.get_logger().warn("Search timeout reached")
-                break
-                
-            self.get_logger().info(f"Moving to search waypoint {i+1}/{len(waypoints)}: ({target_x:.2f}, {target_y:.2f})")
-            
-            # Move to waypoint
-            self.move_to_position(target_x, target_y)
-            
-            # Pause briefly to "look around" at each waypoint
-            time.sleep(0.5)
-            
-            # Simulate potential marker detection (in real implementation, this would come from camera)
-            # For now, we'll simulate finding markers at certain positions
-            detected_markers = self.simulate_marker_detection(target_x, target_y)
-            for marker in detected_markers:
-                if marker not in found_markers:
-                    found_markers.append(marker)
-                    marker_id, x, y, z = marker
-                    self.report_pub.publish(String(data=f"aruco {marker_id} in position x: {x}, y: {y}, z: {z}"))
-                    self.get_logger().info(f"Found ArUco marker {marker_id} at ({x}, {y}, {z})")
-        
-        # Stop movement
+    def evaluator_callback(self, msg: String):
+        text = msg.data.strip().lower()
+        self.get_logger().info(f'/evaluator_message: "{text}"')
+
+        if 'success' in text:
+            if self.state == 'MOVE_TO_MARKER':
+                self.state = 'RETURN_TO_ORIGIN'
+                self.publish_status('returning')
+        elif 'fail' in text or 'adjust' in text:
+            self.publish_status('adjusting_pose')
+
+    def odom_callback(self, msg: Odometry):
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        self.current_pose = (x, y, yaw)
+
+        if self.origin_pose is None:
+            self.origin_pose = (x, y, yaw)
+
+    def image_callback(self, msg: Image):
+        if self.state != 'SEARCH_ARUCO':
+            return
+
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge error: {e}')
+            return
+
+        corners, ids, _ = cv2.aruco.detectMarkers(frame, self.aruco_dict, parameters=self.aruco_params)
+
+        if ids is None or len(ids) == 0:
+            return
+
+        ids = ids.flatten()
+        for i, marker_id in enumerate(ids):
+            pts = corners[i][0]
+            center_x = float(np.mean(pts[:, 0]))
+            center_y = float(np.mean(pts[:, 1]))
+
+            h, w, _ = frame.shape
+            dx_pixels = center_x - w / 2.0
+            dy_pixels = center_y - h / 2.0
+
+            scale = 0.002
+            x = 1.0
+            y = -dx_pixels * scale
+            z = 0.0
+
+            self.marker_poses[marker_id] = (self.current_pose[0] + x, self.current_pose[1] + y, z)
+            self.no_aruco_detected = True
+
+            report = String()
+            report.data = f'aruco{marker_id} position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{z:.2f}'
+            self.report_pub.publish(report)
+            self.get_logger().info(f'Detected aruco{marker_id} at {self.marker_poses[marker_id]}')
+
+            self.stop_robot()
+            self.state = 'STANDBY'
+            self.publish_status('ready')
+            break
+
+    def state_machine_step(self):
+        if self.state == 'STANDBY':
+            self.stop_robot()
+
+        elif self.state == 'SEARCH_ARUCO':
+            self.do_search_aruco()
+
+        elif self.state == 'MOVE_TO_MARKER':
+            self.do_move_to_marker()
+
+        elif self.state == 'RETURN_TO_ORIGIN':
+            self.do_return_to_origin()
+
+    def do_search_aruco(self):
+        """Square pattern - FIXED phase transitions"""
+        if self.phase_start_time is None or self.search_start_time is None:
+            self.phase_start_time = self.get_clock().now()
+            self.search_start_time = self.get_clock().now()
+            self.square_phase = 0
+            return
+
+        dt_total = (self.get_clock().now() - self.search_start_time).nanoseconds / 1e9
+        if dt_total > 60.0:
+            self.stop_robot()
+            if not self.no_aruco_detected:
+                self.publish_status('no_arucos_detected')
+                self.get_logger().warn('Search complete: NO ARUCOS DETECTED')
+            else:
+                self.publish_status('search_timeout')
+            self.state = 'STANDBY'
+            return
+
+        now = self.get_clock().now()
+        dt_since_phase_start = (now - self.phase_start_time).nanoseconds / 1e9
+
         twist = Twist()
-        self.cmd_vel_pub.publish(twist)
-        
-        if found_markers:
-            self.get_logger().info(f"Search completed - found {len(found_markers)} markers")
-        else:
-            self.get_logger().info("Search completed - no markers found")
-            
-        self.status_pub.publish(String(data="ready"))
 
-    def generate_spiral_waypoints(self, area_size, step_size):
-        """Generate waypoints in a spiral pattern covering the search area"""
-        waypoints = []
-        center_x, center_y = 0.0, 0.0  # Start from origin
-        
-        # Spiral parameters
-        max_radius = area_size / 2.0
-        angle_step = 0.5  # radians between waypoints
-        radius_step = step_size
-        
-        radius = 0.0
-        angle = 0.0
-        
-        while radius <= max_radius:
-            x = center_x + radius * math.cos(angle)
-            y = center_y + radius * math.sin(angle)
-            waypoints.append((x, y))
-            
-            angle += angle_step
-            # Increase radius gradually to create spiral
-            radius = min(radius + radius_step * (angle_step / (2 * math.pi)), max_radius)
-        
-        # Add some edge points to ensure full coverage
-        for r in [max_radius * 0.7, max_radius * 0.9, max_radius]:
-            for angle in [0, math.pi/2, math.pi, 3*math.pi/2]:
-                x = center_x + r * math.cos(angle)
-                y = center_y + r * math.sin(angle)
-                waypoints.append((x, y))
-        
-        return waypoints
+        if self.square_phase == 0 or self.square_phase == 2:  # Forward 3s
+            if dt_since_phase_start < 3.0:
+                twist.linear.x = 0.3
+            else:
+                # FIXED: Advance phase when 3s elapsed
+                self.square_phase = (self.square_phase + 1) % 4
+                self.phase_start_time = now
+                self.get_logger().info(f'Phase advance: {self.square_phase-1} -> {self.square_phase}')
 
-    def move_to_position(self, target_x, target_y):
-        """Move robot to a specific position"""
-        # Calculate distance and angle to target
-        current_x, current_y, current_theta = self.current_position
-        distance = math.sqrt((target_x - current_x)**2 + (target_y - current_y)**2)
-        target_angle = math.atan2(target_y - current_y, target_x - current_x)
-        
-        # Normalize angle difference
-        angle_diff = target_angle - current_theta
-        while angle_diff > math.pi:
-            angle_diff -= 2 * math.pi
-        while angle_diff < -math.pi:
-            angle_diff += 2 * math.pi
-        
-        # Turn to face target
+        elif self.square_phase == 1 or self.square_phase == 3:  # Spin 6s
+            twist.angular.z = 0.5
+            if dt_since_phase_start > 6.0:
+                self.square_phase = (self.square_phase + 1) % 4
+                self.phase_start_time = now
+                self.get_logger().info(f'Phase advance: {self.square_phase-1} -> {self.square_phase}')
+
+        self.cmd_pub.publish(twist)
+        self.get_logger().info(f'phase={self.square_phase}, dt={dt_since_phase_start:.1f}s, vel={twist.linear.x:.2f}/{twist.angular.z:.2f}')
+
+    def do_move_to_marker(self):
+        if self.current_goal_id not in self.marker_poses and self.current_goal_id not in self.aruco_positions:
+            self.publish_status('marker_unknown')
+            self.stop_robot()
+            self.state = 'STANDBY'
+            return
+
+        goal_x, goal_y, _ = self.marker_poses.get(self.current_goal_id, self.aruco_positions.get(self.current_goal_id, (0,0,0)))
+        x, y, yaw = self.current_pose
+
+        dx = goal_x - x
+        dy = goal_y - y
+        dist = math.hypot(dx, dy)
+        heading = math.atan2(dy, dx)
+        heading_error = normalize_angle(heading - yaw)
+
+        if dist < 0.5 and abs(heading_error) < math.radians(10):
+            self.stop_robot()
+            msg = String()
+            msg.data = f'arrived to {self.current_goal_id}'
+            self.report_pub.publish(msg)
+            self.state = 'STANDBY'
+            self.publish_status('ready')
+            return
+
         twist = Twist()
-        if abs(angle_diff) > 0.1:  # Only turn if significant angle difference
-            turn_direction = 1.0 if angle_diff > 0 else -1.0
-            twist.angular.z = turn_direction * 0.5
-            self.cmd_vel_pub.publish(twist)
-            time.sleep(abs(angle_diff) / 0.5)  # Wait for turn to complete
-            twist.angular.z = 0.0
-            self.cmd_vel_pub.publish(twist)
-        
-        # Move forward
-        if distance > 0.1:  # Only move if significant distance
-            twist.linear.x = 0.3  # Slower speed for precision
-            self.cmd_vel_pub.publish(twist)
-            time.sleep(distance / 0.3)  # Wait for movement to complete
-            twist.linear.x = 0.0
-            self.cmd_vel_pub.publish(twist)
-        
-        # Update current position
-        self.current_position = (target_x, target_y, target_angle)
+        twist.linear.x = min(0.4, 0.5 * dist)
+        twist.angular.z = 1.5 * heading_error
+        self.cmd_pub.publish(twist)
 
-    def simulate_marker_detection(self, current_x, current_y):
-        """Simulate marker detection at current position"""
-        detected = []
-        detection_range = 2.0  # Can detect markers within 2m
-        
-        for marker_id, (marker_x, marker_y, marker_z) in self.aruco_positions.items():
-            distance = math.sqrt((marker_x - current_x)**2 + (marker_y - current_y)**2)
-            if distance <= detection_range:
-                detected.append((marker_id, marker_x, marker_y, marker_z))
-        
-        return detected
+    def do_return_to_origin(self):
+        if self.origin_pose is None:
+            self.publish_status('no_origin_pose')
+            self.stop_robot()
+            self.state = 'STANDBY'
+            return
 
-    def move_to_marker(self, marker_id):
-        self.get_logger().info(f"Moving to marker {marker_id}")
-        self.status_pub.publish(String(data="moving"))
+        goal_x, goal_y, goal_yaw = self.origin_pose
+        x, y, yaw = self.current_pose
 
-        # Simulate movement to marker
-        target_x, target_y, target_z = self.aruco_positions[marker_id]
+        dx = goal_x - x
+        dy = goal_y - y
+        dist = math.hypot(dx, dy)
+        heading = math.atan2(dy, dx)
+        heading_error = normalize_angle(heading - yaw)
 
-        # Simple movement simulation: assume we can move directly
-        distance = math.sqrt((target_x - self.current_position[0])**2 + (target_y - self.current_position[1])**2)
-        angle = math.atan2(target_y - self.current_position[1], target_x - self.current_position[0])
+        if dist < 0.3 and abs(normalize_angle(yaw - goal_yaw)) < math.radians(10):
+            self.stop_robot()
+            report = String()
+            report.data = 'arrived to origin'
+            self.report_pub.publish(report)
+            self.publish_status('ready')
+            self.state = 'STANDBY'
+            return
 
-        # Turn to face the target
         twist = Twist()
-        twist.angular.z = 0.5 if angle > 0 else -0.5
-        self.cmd_vel_pub.publish(twist)
-        time.sleep(abs(angle) / 0.5)  # Simulate turn time
-        twist.angular.z = 0.0
-        self.cmd_vel_pub.publish(twist)
+        twist.linear.x = min(0.3, 0.5 * dist)
+        twist.angular.z = 1.5 * heading_error
+        self.cmd_pub.publish(twist)
 
-        # Move forward
-        twist.linear.x = 0.5
-        self.cmd_vel_pub.publish(twist)
-        time.sleep(distance / 0.5)  # Simulate move time
-        twist.linear.x = 0.0
-        self.cmd_vel_pub.publish(twist)
-
-        # Update position
-        self.current_position = (target_x, target_y, angle)
-
-        self.report_pub.publish(String(data=f"arrived to {marker_id}"))
-        self.status_pub.publish(String(data="ready"))
-
-    def return_to_origin(self):
-        self.get_logger().info("Returning to origin")
-        self.status_pub.publish(String(data="returning"))
-
-        # Simulate return to origin
-        distance = math.sqrt(self.current_position[0]**2 + self.current_position[1]**2)
-        angle = math.atan2(-self.current_position[1], -self.current_position[0])
-
-        # Turn to face origin
+    def stop_robot(self):
         twist = Twist()
-        twist.angular.z = 0.5 if angle > 0 else -0.5
-        self.cmd_vel_pub.publish(twist)
-        time.sleep(abs(angle) / 0.5)
-        twist.angular.z = 0.0
-        self.cmd_vel_pub.publish(twist)
+        self.cmd_pub.publish(twist)
 
-        # Move to origin
-        twist.linear.x = 0.5
-        self.cmd_vel_pub.publish(twist)
-        time.sleep(distance / 0.5)
-        twist.linear.x = 0.0
-        self.cmd_vel_pub.publish(twist)
-
-        self.current_position = (0.0, 0.0, 0.0)
-
-        self.report_pub.publish(String(data="arrived to origin"))
-        self.status_pub.publish(String(data="ready"))
-
-    def image_analysis(self):
-        self.get_logger().info("Performing image analysis")
-        self.status_pub.publish(String(data="analyze image"))
-
-        # Simulate image analysis
-        time.sleep(1)
-        # Simulate movement detection at some position
-        x, y = 1.0, 2.0
-        self.report_pub.publish(String(data=f"movement at x: {x}, y: {y}"))
-        self.status_pub.publish(String(data="ready"))
-
-    def image_analysis2(self):
-        self.get_logger().info("Performing feature counting")
-        self.status_pub.publish(String(data="analyze image2"))
-
-        # Simulate feature counting
-        time.sleep(1)
-        num_features = 5  # Simulate
-        self.report_pub.publish(String(data=f"{num_features} features detected"))
-        self.status_pub.publish(String(data="ready"))
+    def publish_status(self, text: str):
+        msg = String()
+        msg.data = text
+        self.status_pub.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MissionControlNode()
+    node = MissionController()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
