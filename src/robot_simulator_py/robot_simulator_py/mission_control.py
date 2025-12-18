@@ -61,14 +61,6 @@ class MissionController(Node):
         # FSM timer
         self.timer = self.create_timer(0.1, self.state_machine_step)
 
-        # For simulation
-        self.aruco_positions = {
-            1: (1.0, 2.0, 0.0),
-            2: (-1.0, 3.0, 0.0),
-            3: (2.0, -1.0, 0.0),
-            4: (-2.0, -2.0, 0.0)
-        }
-
         # Initialization
         self.publish_status('ready')
         self.get_logger().info('MissionController started, state=STANDBY')
@@ -87,10 +79,9 @@ class MissionController(Node):
             return  # Already searching!
         if self.state == 'STANDBY' and text == 'standby':
             return  # Already standby!
-        
-        
             
-        # State changes FIRST, THEN log
+        self.get_logger().info(f'/missions: "{text}"')
+
         if text == 'search_aruco':
             self.state = 'SEARCH_ARUCO'
             self.search_start_time = self.get_clock().now()
@@ -98,7 +89,6 @@ class MissionController(Node):
             self.phase_start_time = self.get_clock().now()
             self.square_phase = 0
             self.publish_status('searching')
-            self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
 
         elif text.startswith('move to'):
             parts = text.split()
@@ -106,32 +96,28 @@ class MissionController(Node):
                 self.current_goal_id = int(parts[2])
                 self.state = 'MOVE_TO_MARKER'
                 self.publish_status(f'moving_to_{self.current_goal_id}')
-                self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
             else:
                 self.get_logger().warn('Bad "move to" mission format')
 
         elif text in ['return_to_origin', 'return to origin']:
             self.state = 'RETURN_TO_ORIGIN'
             self.publish_status('returning')
-            self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
 
         elif text == 'image_analysis':
             self.state = 'IMAGE_ANALYSIS'
             self.image_analysis_done = False
             self.publish_status('analyze image')
-            self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
 
         elif text == 'image_analysis2':
             self.state = 'FEATURE_COUNTING'
             self.image_analysis_done = False
             self.publish_status('analyze image2')
-            self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
 
         elif text == 'standby':
             self.state = 'STANDBY'
             self.stop_robot()
             self.publish_status('ready')
-            self.get_logger().info(f'MISSION: "{text}" (state={self.state})')
+            self.get_logger().info('Entered STANDBY mode')
 
         else:
             self.get_logger().warn(f'Unknown mission: {text}')
@@ -192,11 +178,10 @@ class MissionController(Node):
             self.marker_poses[marker_id] = (self.current_pose[0] + x, self.current_pose[1] + y, z)
             self.no_aruco_detected = True
 
-            # FIXED: "arucoin" per spec (not "aruco")
             report = String()
-            report.data = f'arucoin position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{z:.2f}'
+            report.data = f'aruco{marker_id} position x:{self.marker_poses[marker_id][0]:.2f}, y:{self.marker_poses[marker_id][1]:.2f}, z:{z:.2f}'
             self.report_pub.publish(report)
-            self.get_logger().info(f'Detected arucoin{marker_id} at {self.marker_poses[marker_id]}')
+            self.get_logger().info(f'Detected aruco{marker_id} at {self.marker_poses[marker_id]}')
 
             self.stop_robot()
             self.state = 'STANDBY'
@@ -374,7 +359,6 @@ class MissionController(Node):
         heading = math.atan2(dy, dx)
         heading_error = normalize_angle(heading - yaw)
 
-        # FIXED: Use origin yaw for heading check (not goal heading)
         if dist < 0.3 and abs(normalize_angle(yaw - goal_yaw)) < math.radians(10):
             self.stop_robot()
             report = String()
