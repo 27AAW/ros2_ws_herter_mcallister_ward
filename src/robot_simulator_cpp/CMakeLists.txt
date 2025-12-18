@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(custom_interfaces REQUIRED)
 
@@ -25,6 +26,7 @@ add_executable(odometry_node src/odometry_node.cpp)
 ament_target_dependencies(odometry_node
   rclcpp
   geometry_msgs
+  nav_msgs
   tf2_ros
   custom_interfaces
 )

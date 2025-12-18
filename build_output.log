@@ -1,0 +1,22 @@
+Starting >>> custom_interfaces
+Starting >>> robot_bringup
+Finished <<< robot_bringup [0.12s]
+Finished <<< custom_interfaces [0.32s]
+Starting >>> robot_simulator_cpp
+Starting >>> robot_simulator_py
+--- stderr: robot_simulator_cpp
+/home/rex/Documents/ROBE313/ros2_ws_herter_mcallister_ward/src/robot_simulator_cpp/src/odometry_node.cpp:8:10: fatal error: nav_msgs/msg/odometry.hpp: No such file or directory
+    8 | #include <nav_msgs/msg/odometry.hpp>
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+gmake[2]: *** [CMakeFiles/odometry_node.dir/build.make:76: CMakeFiles/odometry_node.dir/src/odometry_node.cpp.o] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:137: CMakeFiles/odometry_node.dir/all] Error 2
+gmake: *** [Makefile:146: all] Error 2
+---
+Failed   <<< robot_simulator_cpp [0.23s, exited with code 2]
+Aborted  <<< robot_simulator_py [0.35s]
+
+Summary: 2 packages finished [0.79s]
+  1 package failed: robot_simulator_cpp
+  1 package aborted: robot_simulator_py
+  1 package had stderr output: robot_simulator_cpp
